@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/safing/portmaster/base/log"
 	"github.com/safing/portmaster/service/firewall/interception/dnsmonitor"
@@ -81,11 +82,35 @@ func start() error {
 		return err
 	}
 
+	// Initialize history tracking
+	if err := InitHistory(); err != nil {
+		return fmt.Errorf("failed to initialize connection history: %w", err)
+	}
+
+	// Start workers
 	module.mgr.Go("clean connections", connectionCleaner)
+	module.mgr.Go("clean history", historyCleanupWorker)
 	module.mgr.Go("write open dns requests", openDNSRequestWriter)
+
+	// Register event callbacks
 	module.instance.Profile().EventDelete.AddCallback("re-attribute connections from deleted profile", reAttributeConnections)
 
 	return nil
+}
+
+// historyCleanupWorker periodically cleans up old history entries
+func historyCleanupWorker(w *mgr.WorkerCtx) error {
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			history.Cleanup()
+		case <-w.Done():
+			return nil
+		}
+	}
 }
 
 var reAttributionLock sync.Mutex

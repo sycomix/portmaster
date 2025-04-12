@@ -14,6 +14,17 @@ var (
 	encryptedOutConnCounter            *metrics.Counter
 	tunneledOutConnCounter             *metrics.Counter
 	outConnCounter                     *metrics.Counter
+
+	// History metrics
+	historyCntTotal   *metrics.Counter
+	historyCntBlocked *metrics.Counter
+	historyCntAllowed *metrics.Counter
+
+	// Bandwidth metrics
+	bandwidthInHistogram  *metrics.Histogram
+	bandwidthOutHistogram *metrics.Histogram
+	bytesReceivedCounter  *metrics.Counter
+	bytesSentCounter      *metrics.Counter
 )
 
 func registerMetrics() (err error) {
@@ -119,6 +130,92 @@ func registerMetrics() (err error) {
 		return err
 	}
 
+	// History metrics
+	historyCntTotal, err = metrics.NewCounter(
+		"network/history/connections/total",
+		nil,
+		&metrics.Options{
+			Name:       "Total Historical Connections",
+			Permission: api.PermitUser,
+		},
+	)
+	if err != nil {
+		return err
+	}
+
+	historyCntBlocked, err = metrics.NewCounter(
+		"network/history/connections/blocked",
+		nil,
+		&metrics.Options{
+			Name:       "Total Blocked Historical Connections",
+			Permission: api.PermitUser,
+		},
+	)
+	if err != nil {
+		return err
+	}
+
+	historyCntAllowed, err = metrics.NewCounter(
+		"network/history/connections/allowed",
+		nil,
+		&metrics.Options{
+			Name:       "Total Allowed Historical Connections",
+			Permission: api.PermitUser,
+		},
+	)
+	if err != nil {
+		return err
+	}
+
+	// Bandwidth metrics
+	bandwidthInHistogram, err = metrics.NewHistogram(
+		"network/bandwidth/in/bytes_per_sec",
+		nil,
+		&metrics.Options{
+			Name:       "Incoming Bandwidth",
+			Permission: api.PermitUser,
+		},
+	)
+	if err != nil {
+		return err
+	}
+
+	bandwidthOutHistogram, err = metrics.NewHistogram(
+		"network/bandwidth/out/bytes_per_sec",
+		nil,
+		&metrics.Options{
+			Name:       "Outgoing Bandwidth",
+			Permission: api.PermitUser,
+		},
+	)
+	if err != nil {
+		return err
+	}
+
+	bytesReceivedCounter, err = metrics.NewCounter(
+		"network/bandwidth/bytes_received",
+		nil,
+		&metrics.Options{
+			Name:       "Total Bytes Received",
+			Permission: api.PermitUser,
+		},
+	)
+	if err != nil {
+		return err
+	}
+
+	bytesSentCounter, err = metrics.NewCounter(
+		"network/bandwidth/bytes_sent",
+		nil,
+		&metrics.Options{
+			Name:       "Total Bytes Sent",
+			Permission: api.PermitUser,
+		},
+	)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -169,4 +266,23 @@ func (conn *Connection) addToMetrics() {
 		outConnCounter.Inc()
 	}
 	conn.addedToMetrics = true
+}
+
+// updateBandwidthMetrics updates the bandwidth-related metrics for a connection
+func (conn *Connection) updateBandwidthMetrics() {
+    if !conn.BandwidthEnabled {
+        return
+    }
+
+    // Update bandwidth histograms
+    bandwidthInHistogram.Update(conn.BandwidthIn)
+    bandwidthOutHistogram.Update(conn.BandwidthOut)
+
+    // Record total bytes received and sent
+    if bytesReceivedCounter != nil {
+        bytesReceivedCounter.Add(1) // Increment by 1 unit
+    }
+    if bytesSentCounter != nil {
+        bytesSentCounter.Add(1) // Increment by 1 unit
+    }
 }

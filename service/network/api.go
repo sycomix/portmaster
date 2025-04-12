@@ -1,6 +1,8 @@
+// Package network handles network connections and their verdicts
 package network
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
@@ -11,6 +13,7 @@ import (
 	"github.com/safing/portmaster/base/api"
 	"github.com/safing/portmaster/base/config"
 	"github.com/safing/portmaster/base/database/query"
+	"github.com/safing/portmaster/base/log"
 	"github.com/safing/portmaster/base/utils/debug"
 	"github.com/safing/portmaster/service/network/state"
 	"github.com/safing/portmaster/service/process"
@@ -20,6 +23,30 @@ import (
 )
 
 func registerAPIEndpoints() error {
+	// Register API endpoints for history queries
+	if err := api.RegisterEndpoint(api.Endpoint{
+		Path:        "history/query",
+		Read:        api.PermitUser,
+		ReadMethod:  http.MethodPost,
+		HandlerFunc: handleHistoryQuery,
+		Name:        "Query Connection History",
+		Description: "Returns connection history entries within the specified time range",
+	}); err != nil {
+		return fmt.Errorf("failed to register history query endpoint: %w", err)
+	}
+
+	// Register API endpoint for history cleanup
+	if err := api.RegisterEndpoint(api.Endpoint{
+		Path:        "history/cleanup",
+		Write:       api.PermitUser,
+		WriteMethod: http.MethodPost,
+		HandlerFunc: handleHistoryCleanup,
+		Name:        "Clean Connection History",
+		Description: "Removes connection history entries older than the retention period",
+	}); err != nil {
+		return fmt.Errorf("failed to register history cleanup endpoint: %w", err)
+	}
+
 	if err := api.RegisterEndpoint(api.Endpoint{
 		Path:        "debug/network",
 		Read:        api.PermitUser,
@@ -62,7 +89,89 @@ func registerAPIEndpoints() error {
 		return err
 	}
 
+	// Bandwidth endpoints
+	if err := api.RegisterEndpoint(api.Endpoint{
+		Path:        "connections/bandwidth",
+		Read:        api.PermitUser,
+		ReadMethod:  http.MethodGet,
+		StructFunc: func(ar *api.Request) (interface{}, error) {
+			type BandwidthInfo struct {
+				ID            string
+				ProcessName   string
+				BandwidthIn   float64
+				BandwidthOut  float64
+				BytesReceived uint64
+				BytesSent     uint64
+			}
+
+			var result []BandwidthInfo
+
+			// Get all active connections
+			for _, conn := range GetAllConnections() {
+				if !conn.BandwidthEnabled {
+					continue
+				}
+
+				conn.Lock()
+				info := BandwidthInfo{
+					ID:            conn.ID,
+					ProcessName:   conn.ProcessContext.ProcessName,
+					BandwidthIn:   conn.BandwidthIn,
+					BandwidthOut:  conn.BandwidthOut,
+					BytesReceived: conn.BytesReceived,
+					BytesSent:     conn.BytesSent,
+				}
+				conn.Unlock()
+
+				result = append(result, info)
+			}
+
+			return result, nil
+		},
+		Name:        "Get Connection Bandwidth",
+		Description: "Returns bandwidth information for all active connections",
+	}); err != nil {
+		return fmt.Errorf("failed to register bandwidth endpoint: %w", err)
+	}
+
 	return nil
+}
+
+type historyQueryRequest struct {
+	From int64 `json:"from"`
+	To   int64 `json:"to"`
+}
+
+func handleHistoryQuery(w http.ResponseWriter, r *http.Request) {
+	var req historyQueryRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("failed to decode request: %s", err), http.StatusBadRequest)
+		return
+	}
+
+	// If To is not specified, use current time
+	if req.To == 0 {
+		req.To = time.Now().Unix()
+	}
+
+	// Query history entries
+	entries, err := history.Query(req.From, req.To)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to query history: %s", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Return entries as JSON
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(entries); err != nil {
+		log.Errorf("failed to encode history entries: %s", err)
+	}
+}
+
+func handleHistoryCleanup(w http.ResponseWriter, r *http.Request) {
+	// Trigger cleanup
+	history.Cleanup()
+	w.WriteHeader(http.StatusOK)
 }
 
 // debugInfo returns the debugging information for support requests.

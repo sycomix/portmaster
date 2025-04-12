@@ -176,36 +176,71 @@ func packetHandlerHandleConn(ctx context.Context, conn *Connection, pkt packet.P
 	conn.Lock()
 	defer conn.Unlock()
 
-	// Check if we should use the default handler.
-	// The default handler is only for fully decided
-	// connections and just applying the verdict.
-	// There is no logging for these packets.
-	if conn.firewallHandler == nil {
-		// Run default handler.
-		defaultFirewallHandler(conn, pkt)
-
-		// Record metrics.
-		packetHandlingHistogram.UpdateDuration(pkt.Info().SeenAt)
-
+	// Update bytes and bandwidth metrics
+	now := time.Now()
+	
+	// Load packet data if not loaded
+	if err := pkt.LoadPacketData(); err != nil {
+		log.Tracer(ctx).Warningf("failed to load packet data: %s", err)
 		return
 	}
 
-	// Create tracing context.
-	// Add context tracer and set context on packet.
+	// Calculate packet size from raw data
+	var packetSize uint64
+	if raw := pkt.Raw(); raw != nil {
+		packetSize = uint64(len(raw))
+	}
+
+	if conn.LastBytesUpdate.IsZero() {
+		conn.LastBytesUpdate = now
+	}
+
+	// Update bytes based on direction
+	if pkt.Info().Inbound {
+		conn.BytesReceived += packetSize
+	} else {
+		conn.BytesSent += packetSize
+	}
+
+	// Calculate bandwidth every second
+	if now.Sub(conn.LastBytesUpdate) >= time.Second {
+		duration := now.Sub(conn.LastBytesUpdate).Seconds()
+		// Calculate bytes per second
+		conn.BandwidthIn = float64(conn.BytesReceived) / duration
+		conn.BandwidthOut = float64(conn.BytesSent) / duration
+		conn.LastBytesUpdate = now
+		
+		// Update bandwidth metrics
+		conn.updateBandwidthMetrics()
+		
+		// Save bandwidth data if enabled
+		if conn.BandwidthEnabled {
+			conn.SaveWhenFinished()
+		}
+	}
+
+	// The rest of the handler code...
+	// Check if we should use the default handler.
+	if conn.firewallHandler == nil {
+		defaultFirewallHandler(conn, pkt)
+		packetHandlingHistogram.UpdateDuration(pkt.Info().SeenAt)
+		return
+	}
+
+	// Create tracing context
 	traceCtx, tracer := log.AddTracer(ctx)
 	if tracer != nil {
-		// The trace is submitted in `network.Connection.packetHandler()`.
 		tracer.Tracef("filter: handling packet: %s", pkt)
 	}
 	pkt.SetCtx(traceCtx)
 
-	// Handle packet with set handler.
+	// Handle packet with set handler
 	conn.firewallHandler(conn, pkt)
 
-	// Record metrics.
+	// Record metrics
 	packetHandlingHistogram.UpdateDuration(pkt.Info().SeenAt)
 
-	// Log result and submit trace, when there are any changes.
+	// Log result and submit trace
 	if conn.saveWhenFinished {
 		switch {
 		case conn.DataIsComplete():
@@ -215,11 +250,10 @@ func packetHandlerHandleConn(ctx context.Context, conn *Connection, pkt packet.P
 		default:
 			tracer.Debugf("filter: gathered data on connection %s", conn)
 		}
-		// Submit trace logs.
 		tracer.Submit()
 	}
 
-	// Push changes, if there are any.
+	// Save changes if needed
 	if conn.saveWhenFinished {
 		conn.saveWhenFinished = false
 		conn.Save()

@@ -7,7 +7,6 @@ import (
 	"net"
 	"path/filepath"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -164,12 +163,12 @@ func reportBandwidth(ctx context.Context, objs bpfObjects, bandwidthUpdates chan
 func findCgroupPath() (string, error) {
 	cgroupPath := "/sys/fs/cgroup"
 
-	var st syscall.Statfs_t
-	err := syscall.Statfs(cgroupPath, &st)
+	var st unix.Statfs_t
+	err := unix.Statfs(cgroupPath, &st)
 	if err != nil {
 		return "", err
 	}
-	isCgroupV2Enabled := st.Type == unix.CGROUP2_SUPER_MAGIC
+	isCgroupV2Enabled := st.FSType == unix.CGROUP2_SUPER_MAGIC
 	if !isCgroupV2Enabled {
 		cgroupPath = filepath.Join(cgroupPath, "unified")
 	}

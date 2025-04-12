@@ -174,7 +174,7 @@ type Connection struct { //nolint:maligned // TODO: fix alignment
 	// HistoryEnabled is set to true when the connection should be persisted
 	// in the history database.
 	HistoryEnabled bool
-	// BanwidthEnabled is set to true if connection bandwidth data should be persisted
+	// BandwidthEnabled is set to true if connection bandwidth data should be persisted
 	// in netquery.
 	BandwidthEnabled bool
 
@@ -182,6 +182,12 @@ type Connection struct { //nolint:maligned // TODO: fix alignment
 	BytesReceived uint64
 	// BytesSent holds the observed sent bytes of the connection.
 	BytesSent uint64
+	// LastBytesUpdate holds the timestamp of the last bandwidth update
+	LastBytesUpdate time.Time
+	// BandwidthIn holds the current incoming bandwidth in bytes/second
+	BandwidthIn float64
+	// BandwidthOut holds the current outgoing bandwidth in bytes/second
+	BandwidthOut float64
 
 	// lastSeen holds the timestamp when the connection was last seen.
 	// If permanent verdicts are enabled and bandwidth reporting is not active,
@@ -670,6 +676,45 @@ func (conn *Connection) UpdateFeatures() error {
 	return nil
 }
 
+// SaveToHistory saves a connection to history if history is enabled for it
+func (conn *Connection) SaveToHistory() {
+	if !conn.HistoryEnabled {
+		return
+	}
+
+	entry := &HistoryEntry{
+		ID:            conn.ID,
+		ProcessName:   conn.ProcessContext.ProcessName,
+		ProcessPath:   conn.ProcessContext.BinaryPath,
+		Domain:        conn.Entity.Domain,
+		RemoteIP:      conn.Entity.IP.String(),
+		Protocol:      conn.Entity.Protocol,
+		Port:          conn.Entity.Port,
+		Verdict:       conn.Verdict,
+		Started:       conn.Started,
+		Ended:         conn.Ended,
+		BytesReceived: conn.BytesReceived,
+		BytesSent:     conn.BytesSent,
+		Internal:      conn.Internal,
+		Tunneled:      conn.Tunneled,
+		Encrypted:     conn.Encrypted,
+	}
+
+	if err := history.Save(entry); err != nil {
+		log.Warningf("failed to save connection history: %s", err)
+		return
+	}
+
+	// Update history metrics 
+	historyCntTotal.Inc()
+	switch conn.Verdict {
+	case VerdictBlock, VerdictDrop:
+		historyCntBlocked.Inc()
+	case VerdictAccept, VerdictRerouteToNameserver, VerdictRerouteToTunnel:
+		historyCntAllowed.Inc() 
+	}
+}
+
 // AcceptWithContext accepts the connection.
 func (conn *Connection) AcceptWithContext(reason, reasonOptionKey string, ctx interface{}) {
 	if !conn.SetVerdict(VerdictAccept, reason, reasonOptionKey, ctx) {
@@ -819,6 +864,11 @@ func (conn *Connection) Save() {
 	}
 
 	conn.addToMetrics()
+
+	// Save to history if the connection has ended and history is enabled
+	if conn.Ended != 0 && conn.HistoryEnabled {
+		conn.SaveToHistory()
+	}
 
 	// notify database controller
 	dbController.PushUpdate(conn)
